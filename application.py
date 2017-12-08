@@ -6,6 +6,7 @@ import time
 from password_encrypter import PasswordEncrypter
 from dynamo_backend import DynamoBackend
 from urllib.parse import urljoin
+from validation import Validator
 
 class PassSh(Bottle):
     
@@ -22,6 +23,7 @@ class PassSh(Bottle):
 
         self.password_encrypter = PasswordEncrypter(self.ENV_ENCRYPTION_KEY)
         self.dynamo_backend = DynamoBackend(self.ENV_TABLE_NAME, self.ENV_AWS_REGION)
+        self.validator = Validator(self.ENV_MAX_PW_LENGTH, self.ENV_MAX_DAYS, self.ENV_MAX_VIEWS)
 
     def establish_environment(self):
         self.ENV_ENCRYPTION_KEY = os.environ.get('ENCRYPTION_KEY', None)
@@ -36,6 +38,9 @@ class PassSh(Bottle):
         self.ENV_AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
         self.ENV_DEBUG = os.environ.get('ENV_DEBUG', False)
         self.ENV_HANDLE_SSL_REDIRECT = os.environ.get('ENV_HANDLE_SSL_REDIRECT', True)
+        self.ENV_MAX_PW_LENGTH = os.environ.get('ENV_MAX_PW_LENGTH', 4096)
+        self.ENV_MAX_DAYS = os.environ.get('ENV_MAX_DAYS', 5)
+        self.ENV_MAX_VIEWS = os.environ.get('ENV_MAX_VIEWS', 10)
 
     def start(self):
         print('Password sharing service is alive')
@@ -51,7 +56,7 @@ class PassSh(Bottle):
                 return redirect(urljoin(self.ENV_BASE_URL, request.path))
 
     def index(self):
-        return template('index')
+        return template('index', max_days = self.ENV_MAX_DAYS, max_views = self.ENV_MAX_VIEWS)
 
     def show(self, uuid):
         item = self.dynamo_backend.get(uuid)
@@ -71,19 +76,22 @@ class PassSh(Bottle):
 
     def create(self):
         request_type, params = self.parse_request()
-        if params['secret']:
-            success, url = self.create_secret(params['secret'],
-                    params['views'],
-                    params['days'])
-            if success:
-                if request_type == 'web':
-                    return template('share', url = url, days = params['days'], views = params['views'])
+        if validate_params(params):
+            if params['secret']:
+                success, url = self.create_secret(params['secret'],
+                        params['views'],
+                        params['days'])
+                if success:
+                    if request_type == 'web':
+                        return template('share', url = url, days = params['days'], views = params['views'])
+                    else:
+                        return { 'url': url, 'days': params['days'], 'views': params['views'] } 
                 else:
-                    return { 'url': url, 'days': params['days'], 'views': params['views'] } 
+                    return template('index', error = 'Backend service is unavailable')
             else:
-                return template('index', error = 'Backend service is unavailable')
+                return template('index', error = 'Nothing in payload')
         else:
-            return template('index', error = 'Nothing in payload')
+            return template('index', error = 'Invalid parameters specified')
 
     def healthcheck(self):
         return 'This is the password sharing service. Go away!'
@@ -108,6 +116,12 @@ class PassSh(Bottle):
             return 'json', request.json
         else:
             return 'web', request.params
+
+    def validate_params(self, params):
+        secret = params.get('secret', None)
+        days = params.get('days', None)
+        views = params.get('views', None)
+        return self.validator.is_valid_password(secret) and self.validator.is_valid_days(days) and self.validator.is_valid_views(views)
 
 if __name__ == '__main__':
     service = PassSh()
